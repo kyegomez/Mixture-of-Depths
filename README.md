@@ -8,7 +8,7 @@ Implementation of the paper: "Mixture-of-Depths: Dynamically allocating compute 
 `pip3 install mixture-of-depths`
 
 ## usage
-```
+
 
 # License
 MIT

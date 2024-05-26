@@ -1,124 +1,112 @@
-# import torch
-# from torch import nn, Tensor
-# from einops import reduce
-
-# class TokenRouterPredictor(nn.Module):
-#     """A router to emit scalar weights for each token."""
-
-#     def __init__(self, dim):
-#         super(TokenRouterPredictor, self).__init__()
-#         # Simple linear layer to generate a scalar weight for each token
-#         self.weight_predictor = nn.Linear(dim, 1)
-
-#     def forward(self, x):
-#         # x: [batch_size, seq_len, dim]
-#         weights = self.weight_predictor(x)  # [batch_size, seq_len, 1]
-#         return weights
-
-
-# class MoDRouter(nn.Module):
-#     def __init__(
-#         self,
-#         dim: int,
-#         num_tokens: int,
-#         token_limit: int,
-#         block: nn.Module,
-#     ):
-#         super().__init__()
-#         self.dim = dim
-#         self.num_tokens = num_tokens
-#         # Limit of percentage of tokens to be attended to
-#         self.token_limit = token_limit
-#         # self.block = block
-
-#         # Token router Predictor
-#         self.token_predictor = TokenRouterPredictor(dim)
-
-#         # Get the number of tokens to be attended to
-#         num_tokens = int(self.token_limit * self.num_tokens)
-
-#     def forward(self, x: Tensor) -> Tensor:
-#         # x: [batch_size, seq_len, dim]
-#         # Get the weights for each token
-#         weights = self.token_predictor(x)
-#         print(weights)
-#         weights = reduce(weights, "b s d -> d", "min")
-
-#         # # Apply softmax to get the routing probabilities
-#         # weights = torch.softmax(weights, dim=-1)
-
-#         # # Get the top-k tokens
-#         # _, indices = torch.topk(weights, self.num_tokens, dim=1)
-
-#         # # Get the top-k token embeddings
-#         # topk_tokens = torch.gather(
-#         #     x, 1, indices.expand(-1, self.num_tokens, -1)
-#         # )
-
-#         # Apply the block to the top-k tokens
-#         # out = self.block(weights)
-
-#         return weights
-
-
-# # Random tensor of shape [batch_size, seq_len, dim]
-# x = torch.randn(2, 10, 64)
-
-# # Create the MoD Router
-# mod_router = MoDRouter(64, 10, 0.5, block=None) #nn.Linear(64, 64))
-
-# # Get the output
-# out = mod_router(x)
-# print(out.shape)  # torch.Size([2, 10, 64])
-
-
-import torch
+import torch 
 from torch import nn, Tensor
-
-
-class TokenRouter(nn.Module):
-    def __init__(self, embed_dim):
-        super().__init__()
-        self.weight_predictor = nn.Linear(embed_dim, 1)
-
-    def forward(self, x):
-        weights = self.weight_predictor(x).squeeze(
-            -1
-        )  # [batch_size, seq_len]
-        return weights
-
+import torch.nn.functional as F
 
 class MoD(nn.Module):
-    def __init__(self, capacity, block):
+    def __init__(
+        self,
+        seq_len: int = None,
+        dim: int = None,
+        capacity_factor: int = None,
+        transformer_block: nn.Module = None,
+        aux_loss: bool = True,
+        *args,
+        **kwargs
+    ):
         super().__init__()
-        self.router = TokenRouter(block.dim)
-        self.block = block
-        self.capacity = capacity
-
-    def forward(self, x: Tensor):
-        b, s, d = x.shape
-        weights = self.router(x)
-
-        # Compute B-th percentil for router weightsto determine the capacity threshold
-        k = int(self.capacity * s)
-        top_k_values, _ = torch.topk(weights, k, dim=1, sorted=True)
-        threshold = top_k_values[:, :, -1]
-
-        # Determine which tokens exceed the threshold
-        selected_mask = weights > threshold.unsqueeze(-1)
-
-        # Process onlys elected tokens through the block
-        processed_tokens = torch.zeros_like(x)
-        for i in range(b):
-            # Process tokens for each block
-            selected_tokens = x[i][selected_mask[i]]
-            if selected_tokens.size(0) > 0:
-                processed_tokens[i][selected_mask[i]] = self.block(
-                    selected_tokens.unsqueeze(0)
-                ).squeeze(0)
-
-        # Combine processed tokens with unprocessed ones
-        output = processed_tokens + (
-            x * (~selected_mask).unsqueeze(-1).to(x.dtype)
+        self.seq_len = seq_len
+        self.dim = dim
+        self.capacity_factor = capacity_factor
+        self.transformer_block = transformer_block
+        self.aux_loss = aux_loss
+        self.router = nn.Linear(dim, 1, bias=False)
+        
+        self.aux_router = nn.Sequential(
+            nn.Linear(dim, dim // 2),
+            nn.SiLU(),
+            nn.Linear(dim // 2, 1)
         )
-        return output
+        
+    def forward(self, x: Tensor, mask: Tensor, freqs_cis: Tensor, *args, **kwargs) -> Tensor:
+        b, s, d = x.shape
+        device = x.device
+        
+        # Top k
+        top_k = int(s * self.capacity_factor)
+        
+        # Scalar weights for each token
+        router_logits = self.router(x)
+        
+        # Equation 1
+        token_weights, token_index = torch.topk(
+            router_logits,
+            top_k,
+            dim=1,
+            sorted=False
+        )
+        
+        # Selected
+        selected_tokens, index = torch.sort(token_index, dim=1)
+        
+        # Select idx
+        indices_expanded = selected_tokens.expand(-1, -1, self.dim)
+        
+        # Filtered topk tokens with capacity c
+        filtered_x = torch.gather(
+            input = x,
+            dim = 1,
+            index = indices_expanded
+        )
+        
+        # X
+        x_out, _ = self.transformer_block(x, mask, freqs_cis)
+        
+        # Softmax router weights
+        token_weights = F.softmax(token_weights, dim=1)
+        
+        # Selecting router weight by idx
+        r_weights = torch.gather(token_weights, dim=1, index=index)
+        
+        # Multiply by router weights
+        xw_out = r_weights * x_out
+        
+        # Out
+        out = torch.scatter_add(
+            input = x, 
+            dim = 1,
+            index = indices_expanded,
+            src = xw_out
+        )
+
+        # Aux loss
+        # if self.aux_loss:
+        #     aux_loss = self.aux_loss(
+                
+        #     )
+        if self.aux_loss:
+            aux_loss = self.aux_loss(
+                out,
+                router_logits,
+                selected_tokens
+            )
+            return out, aux_loss
+        return out, _
+        
+    def aux_loss(
+        self,
+        x: Tensor,
+        router_logits: Tensor,
+        selected_tokens: Tensor
+    ):
+        b, s, d = x.shape
+        
+        router_targets = torch.zeros_like(router_logits).view(-1)
+        
+        router_targets[selected_tokens.view(-1)] = 1.0
+        aux_router_logits = self.aux_router(
+            x.detach().view(b * s, -1)
+        )
+        return F.binary_cross_entropy(aux_router_logits.view(-1), router_targets)
+    
+    
+    
