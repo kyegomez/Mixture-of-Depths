@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "mixture-of-depths"
-version = "0.0.1"
+version = "0.0.2"
 description = "Paper - Pytorch"
 license = "MIT"
 authors = ["Kye Gomez <kye@apac.ai>"]
@@ -26,6 +26,7 @@ python = "^3.10"
 zetascale = "*"
 torch = "*"
 einops = "*"
+ring-attention-pytorch = "*"
 
 
 [tool.poetry.group.lint.dependencies]
