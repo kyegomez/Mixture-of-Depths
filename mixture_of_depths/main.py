@@ -1,8 +1,7 @@
 import torch
 import torch.nn.functional as F
-from ring_attention_pytorch import RingAttention
 from torch import Tensor, nn
-from zeta.nn import FeedForward, OutputHead
+from zeta.nn import FeedForward, MultiQueryAttention
 
 
 def exists(val):
@@ -61,17 +60,9 @@ class LongGeminiTransformerBlock(nn.Module):
         self.ring_seq_size = ring_seq_size
 
         # Attention model for the block
-        self.attn = RingAttention(
-            dim=dim,
-            dim_head=dim_head,
-            heads=True,
-            causal=True,
-            auto_shard_seq=True,
-            ring_attn=True,
-            ring_seq_size=ring_seq_size,
-            prenorm=True,
-            *args,
-            **kwargs,
+        self.attn = MultiQueryAttention(
+            dim,
+            heads,
         )
 
         # Post Attention layer normalization
@@ -94,114 +85,12 @@ class LongGeminiTransformerBlock(nn.Module):
         x = self.norm(x)
 
         # Attention
-        x = self.attn(x) + x
+        x, _, _ = self.attn(x) + x
 
         # Feedforward
         x = self.ffn(x) + x
 
         return x
-
-
-class LongGemini(nn.Module):
-    """
-    LongGemini model implementation.
-
-    Args:
-        dim (int): Dimension of the input.
-        depth (int, optional): Depth of the model. Defaults to 32.
-        dim_head (int, optional): Dimension of each head. Defaults to 128.
-        long_gemini_depth (int, optional): Depth of the LongGemini model. Defaults to 9.
-        heads (int, optional): Number of attention heads. Defaults to 24.
-        qk_norm (bool, optional): Whether to apply normalization to query and key. Defaults to True.
-        ff_mult (int, optional): Multiplier for the feed-forward layer dimension. Defaults to 4.
-        ring_seq_size (int, optional): Size of the ring sequence. Defaults to 512.
-        *args: Variable length argument list.
-        **kwargs: Arbitrary keyword arguments.
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        depth: int = 32,
-        num_tokens: int = 10000,
-        seq_len: int = 8192,
-        dim_head: int = 128,
-        long_gemini_depth: int = 9,
-        heads: int = 24,
-        qk_norm: bool = True,
-        ff_mult: int = 4,
-        ring_seq_size: int = 512,
-        *args,
-        **kwargs,
-    ):
-        super(LongGemini, self).__init__()
-        self.dim = dim
-        self.depth = depth
-        self.num_tokens = num_tokens
-        self.seq_len = seq_len
-        self.dim_head = dim_head
-        self.long_gemini_depth = long_gemini_depth
-        self.heads = heads
-        self.qk_norm = qk_norm
-        self.ff_mult = ff_mult
-        self.ring_seq_size = ring_seq_size
-
-        self.output_head = OutputHead(
-            dim,
-            1,
-        )
-
-        # Layers for the model
-        self.layers = nn.ModuleList(
-            [
-                LongGeminiTransformerBlock(
-                    dim,
-                    depth,
-                    dim_head,
-                    heads,
-                    qk_norm,
-                    ff_mult,
-                    ring_seq_size,
-                    *args,
-                    **kwargs,
-                )
-                for _ in range(long_gemini_depth)
-            ]
-        )
-
-        # Embedding layer for the model
-        self.embed = nn.Embedding(num_tokens, dim)
-
-        # Norm
-        self.norm = nn.LayerNorm(dim)
-
-    def forward(
-        self,
-        text: Tensor,
-        *args,
-        **kwargs,
-    ):
-        """
-        Forward pass of the LongGemini model.
-
-        Args:
-            x (Tensor): Input tensor.
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-
-        Returns:
-            Tensor: Output tensor.
-        """
-        # Text embedding
-        x = self.embed(text)
-        x = self.norm(x)
-
-        # Apply the layers
-        for layer in self.layers:
-            x = layer(x)
-            x = self.norm(x)
-
-        return self.output_head(x)
 
 
 class MoD(nn.Module):
@@ -211,7 +100,9 @@ class MoD(nn.Module):
         dim: int = None,
         capacity_factor: int = None,
         transformer_block: nn.Module = None,
-        aux_loss: bool = True,
+        vocab_size: int = None,
+        aux_loss_on: bool = False,
+        transformer_depth: int = None,
         *args,
         **kwargs,
     ):
@@ -220,7 +111,9 @@ class MoD(nn.Module):
         self.dim = dim
         self.capacity_factor = capacity_factor
         self.transformer_block = transformer_block
-        self.aux_loss = aux_loss
+        self.aux_loss_on = aux_loss_on
+        self.vocab_size = vocab_size
+        self.transformer_depth = transformer_depth
         self.router = nn.Linear(dim, 1, bias=False)
 
         self.aux_router = nn.Sequential(
@@ -229,11 +122,17 @@ class MoD(nn.Module):
             nn.Linear(dim // 2, 1),
         )
 
+        # Transformer Block
+        # self.transformer = LongGeminiTransformerBlock(
+        #     dim,
+        #     transformer_depth,
+        # )
+
     def forward(
         self,
-        x: Tensor,
-        mask: Tensor,
-        freqs_cis: Tensor,
+        x: Tensor = None,
+        mask: Tensor = None,
+        freqs_cis: Tensor = None,
         *args,
         **kwargs,
     ) -> Tensor:
@@ -261,9 +160,12 @@ class MoD(nn.Module):
         filtered_x = torch.gather(
             input=x, dim=1, index=indices_expanded
         )
+        print(filtered_x.shape)
 
-        # X
-        x_out, _ = self.transformer_block(filtered_x, mask, freqs_cis)
+        if self.transformer_block:
+            x_out = self.transformer_block(x)
+        else:
+            x_out = filtered_x
 
         # Softmax router weights
         token_weights = F.softmax(token_weights, dim=1)
@@ -284,12 +186,12 @@ class MoD(nn.Module):
         #     aux_loss = self.aux_loss(
 
         #     )
-        if self.aux_loss:
+        if self.aux_loss_on is not False:
             aux_loss = self.aux_loss(
                 out, router_logits, selected_tokens
             )
             return out, aux_loss
-        return out, _
+        return out
 
     def aux_loss(
         self,
