@@ -1,13 +1,12 @@
 [![Multi-Modality](agorabanner.png)](https://discord.gg/qUtxnK2NMf)
 
-## Mixture of Depths Scaling
-Implementation of the paper: "Mixture-of-Depths: Dynamically allocating compute in transformer-based language models". From the paper: "These models match baseline performance for equivalent FLOPS and wall-clock times to train, but require a fraction of the FLOPs per forward pass, and can be upwards of 50% faster to step during post-training sampling."
+## Mixture of Depths Ölçeklendirmesi
+"Mixture-of-Depths: Dynamically allocating compute in transformer-based language models" makalesinin uygulamasıdır. Makaleden: "Bu modeller, eğitim için eşdeğer FLOP ve gerçek (wall-clock) sürelerde temel performansla eşleşir; ancak ileri geçiş başına düşen FLOP miktarının yalnızca küçük bir kısmına ihtiyaç duyarlar ve eğitim sonrası örnekleme adımlarında %50'ye kadar daha hızlı olabilirler."
 
-
-## install 
+## İndir
 `pip3 install mixture-of-depths`
 
-## usage
+## Kullanım
 ```python
 import torch
 from mixture_of_depths.main import MoD
@@ -29,5 +28,5 @@ out = model(x)
 print(out)
 ```
 
-# License
+# Lisans
 MIT

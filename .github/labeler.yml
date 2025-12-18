@@ -1,12 +1,16 @@
-# this is a config file for the github action labeler
+# GitHub Action Labeler v5 uyumlu yapılandırma dosyası
 
-# Add 'label1' to any changes within 'example' folder or any subfolders
+# 'example' klasörü veya alt klasörlerindeki değişiklikler için
 example_change:
-- example/**
+  - changed-files:
+    - any-glob-to-any-file: 'example/**'
 
-# Add 'label2' to any file changes within 'example2' folder
-example2_change: example2/*
+# 'example2' klasöründeki dosya değişiklikleri için
+example2_change:
+  - changed-files:
+    - any-glob-to-any-file: 'example2/*'
 
-# Add label3 to any change to .txt files within the entire repository. Quotation marks are required for the leading asterisk
+# Tüm depodaki .txt dosyası değişiklikleri için
 text_files:
-- '**/*.txt'
+  - changed-files:
+    - any-glob-to-any-file: '**/*.txt'
